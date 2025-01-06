@@ -1,245 +1,282 @@
+using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
+
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddOpenApi();
+
+// Add services to the container.
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options
+        .UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection"))
+        .UseSnakeCaseNamingConvention());
+
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+// Task Group Endpoints
+app.MapPost("/task-groups", async (AppDbContext dbContext, TaskGroup taskGroup) =>
 {
-    app.MapOpenApi();
-}
+    dbContext.TaskGroups.Add(taskGroup);
+    await dbContext.SaveChangesAsync();
+    return Results.Created($"/task-groups/{taskGroup.Id}", taskGroup);
+})
+.WithOpenApi();
 
-app.UseHttpsRedirection();
-
-// In-memory database for demo purposes
-var taskGroups = new List<TaskGroup>();
-var tasks = new List<Task>();
-var userPreferences = new Dictionary<string, UserPreferences>();
-var users = new List<User>();
-
-// Task Groups Endpoints
-app.MapPost("/task-groups", (TaskGroup newGroup) =>
+app.MapGet("/task-groups", async (AppDbContext dbContext) =>
 {
-    newGroup.Id = Guid.NewGuid();
-    taskGroups.Add(newGroup);
-    return Results.Created($"/task-groups/{newGroup.Id}", newGroup);
-});
+    var taskGroups = await dbContext.TaskGroups
+        .Select(g => new
+        {
+            g.Id,
+            g.Name,
+            TaskCount = g.Tasks.Count,
+        })
+        .ToListAsync();
+    return Results.Ok(taskGroups);
+})
+.WithOpenApi();
 
-app.MapGet("/task-groups", () =>
+app.MapGet("/task-groups/{id}", async (AppDbContext dbContext, int id) =>
 {
-    return Results.Ok(taskGroups.Select(g => new
-    {
-        g.Id,
-        g.Name,
-        TaskCount = tasks.Count(t => t.GroupId == g.Id),
-        g.LastUpdated
-    }));
-});
+    var taskGroup = await dbContext.TaskGroups
+        .Include(g => g.Tasks)
+        .FirstOrDefaultAsync(g => g.Id == id);
 
-app.MapGet("/task-groups/{id}", (Guid id) =>
-{
-    var group = taskGroups.FirstOrDefault(g => g.Id == id);
-    return group is not null ? Results.Ok(group) : Results.NotFound();
-});
+    if (taskGroup == null) return Results.NotFound();
+    return Results.Ok(taskGroup);
+})
+.WithOpenApi();
 
-app.MapPut("/task-groups/{id}", (Guid id, TaskGroup updatedGroup) =>
+app.MapPut("/task-groups/{id}", async (AppDbContext dbContext, int id, TaskGroup updatedGroup) =>
 {
-    var group = taskGroups.FirstOrDefault(g => g.Id == id);
-    if (group is null) return Results.NotFound();
+    var group = await dbContext.TaskGroups.FindAsync(id);
+    if (group == null) return Results.NotFound();
 
     group.Name = updatedGroup.Name;
-    group.LastUpdated = DateTime.UtcNow;
-    return Results.Ok(group);
-});
-
-app.MapDelete("/task-groups/{id}", (Guid id) =>
-{
-    var group = taskGroups.FirstOrDefault(g => g.Id == id);
-    if (group is null) return Results.NotFound();
-
-    taskGroups.Remove(group);
-    tasks.RemoveAll(t => t.GroupId == id);
+    await dbContext.SaveChangesAsync();
     return Results.NoContent();
-});
+})
+.WithOpenApi();
 
-// Tasks Endpoints
-app.MapPost("/tasks", (Task newTask) =>
+app.MapDelete("/task-groups/{id}", async (AppDbContext dbContext, int id) =>
 {
-    newTask.Id = Guid.NewGuid();
-    newTask.CreatedAt = DateTime.UtcNow;
-    tasks.Add(newTask);
-    return Results.Created($"/tasks/{newTask.Id}", newTask);
-});
+    var group = await dbContext.TaskGroups
+        .Include(g => g.Tasks)
+        .FirstOrDefaultAsync(g => g.Id == id);
 
-app.MapGet("/task-groups/{groupId}/tasks", (Guid groupId, int page = 1, int pageSize = 20, string? sortBy = null, string? sortOrder = "asc") =>
+    if (group == null) return Results.NotFound();
+
+    group.IsDeleted = true;
+    foreach (var task in group.Tasks)
+    {
+        task.IsDeleted = true;
+    }
+
+    await dbContext.SaveChangesAsync();
+    return Results.NoContent();
+})
+.WithOpenApi();
+
+// Task Endpoints
+app.MapPost("/tasks", async (AppDbContext dbContext, Task task) =>
 {
-    var groupTasks = tasks.Where(t => t.GroupId == groupId);
+    dbContext.Tasks.Add(task);
+    await dbContext.SaveChangesAsync();
+    return Results.Created($"/tasks/{task.Id}", task);
+})
+.WithOpenApi();
+
+app.MapGet("/task-groups/{groupId}/tasks", async (AppDbContext dbContext, int groupId, int page = 1, int pageSize = 10, string? sortBy = null, string sortOrder = "asc") =>
+{
+    var query = dbContext.Tasks.Where(t => t.TaskGroupId == groupId);
 
     if (!string.IsNullOrEmpty(sortBy))
     {
-        groupTasks = sortBy switch
+        query = sortOrder.ToLower() switch
         {
-            "CustomProperties.DueDate" => sortOrder == "desc" 
-                ? groupTasks.OrderByDescending(t => t.CustomProperties["DueDate"]) 
-                : groupTasks.OrderBy(t => t.CustomProperties["DueDate"]),
-            "CustomProperties.Priority" => sortOrder == "desc" 
-                ? groupTasks.OrderByDescending(t => t.CustomProperties["Priority"]) 
-                : groupTasks.OrderBy(t => t.CustomProperties["Priority"]),
-            _ => sortOrder == "desc"
-                ? groupTasks.OrderByDescending(t => EF.Property<object>(t, sortBy))
-                : groupTasks.OrderBy(t => EF.Property<object>(t, sortBy))
+            "desc" => query.OrderByDescending(t => EF.Property<object>(t, sortBy)),
+            _ => query.OrderBy(t => EF.Property<object>(t, sortBy)),
         };
     }
 
-    var pagedTasks = groupTasks
-        .Skip((page - 1) * pageSize)
-        .Take(pageSize)
-        .ToList();
+    var totalTasks = await query.CountAsync();
+    var tasks = await query.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync();
 
-    return Results.Ok(pagedTasks);
-});
+    return Results.Ok(new { totalTasks, tasks });
+})
+.WithOpenApi();
 
-app.MapGet("/tasks/{id}", (Guid id) =>
+app.MapGet("/tasks/{id}", async (AppDbContext dbContext, int id) =>
 {
-    var task = tasks.FirstOrDefault(t => t.Id == id);
-    return task is not null ? Results.Ok(task) : Results.NotFound();
-});
+    var task = await dbContext.Tasks.FindAsync(id);
+    if (task == null) return Results.NotFound();
+    return Results.Ok(task);
+})
+.WithOpenApi();
 
-app.MapPut("/tasks/{id}", (Guid id, Task updatedTask) =>
+app.MapPut("/tasks/{id}", async (AppDbContext dbContext, int id, Task updatedTask) =>
 {
-    var task = tasks.FirstOrDefault(t => t.Id == id);
-    if (task is null) return Results.NotFound();
+    var task = await dbContext.Tasks.FindAsync(id);
+    if (task == null) return Results.NotFound();
 
     task.Title = updatedTask.Title;
     task.State = updatedTask.State;
     task.AssigneeId = updatedTask.AssigneeId;
     task.CustomProperties = updatedTask.CustomProperties;
-    task.LastUpdated = DateTime.UtcNow;
-    return Results.Ok(task);
-});
 
-app.MapDelete("/tasks/{id}", (Guid id) =>
-{
-    var task = tasks.FirstOrDefault(t => t.Id == id);
-    if (task is null) return Results.NotFound();
-
-    tasks.Remove(task);
+    await dbContext.SaveChangesAsync();
     return Results.NoContent();
-});
+})
+.WithOpenApi();
 
-app.MapGet("/tasks/assignees", () =>
+app.MapDelete("/tasks/{id}", async (AppDbContext dbContext, int id) =>
 {
-    var activeUsers = users.Where(u => u.IsActive).Select(u => new
-    {
-        u.Id,
-        u.Name,
-        u.Email
-    });
+    var task = await dbContext.Tasks.FindAsync(id);
+    if (task == null) return Results.NotFound();
 
-    return Results.Ok(activeUsers);
-});
+    task.IsDeleted = true;
+    await dbContext.SaveChangesAsync();
+    return Results.NoContent();
+})
+.WithOpenApi();
 
-app.MapPut("/tasks/{taskId}/assign/{userId}", (Guid taskId, Guid userId) =>
+app.MapPut("/tasks/{taskId}/assign/{userId}", async (AppDbContext dbContext, int taskId, int userId) =>
 {
-    var task = tasks.FirstOrDefault(t => t.Id == taskId);
-    if (task is null) return Results.NotFound("Task not found.");
+    var task = await dbContext.Tasks.FindAsync(taskId);
+    if (task == null) return Results.NotFound();
 
-    var user = users.FirstOrDefault(u => u.Id == userId && u.IsActive);
-    if (user is null) return Results.NotFound("User not found or inactive.");
+    var user = await dbContext.Users.FindAsync(userId);
+    if (user == null || !user.IsActive) return Results.BadRequest("Invalid or inactive user.");
 
     task.AssigneeId = userId;
-    task.LastUpdated = DateTime.UtcNow;
-
-    return Results.Ok(task);
-});
-
-// User Preferences Endpoints
-app.MapGet("/user-preferences/{userId}", (string userId) =>
-{
-    userPreferences.TryGetValue(userId, out var preferences);
-    return preferences is not null ? Results.Ok(preferences) : Results.NotFound();
-});
-
-app.MapPut("/user-preferences/{userId}", (string userId, UserPreferences updatedPreferences) =>
-{
-    userPreferences[userId] = updatedPreferences;
-    return Results.Ok(updatedPreferences);
-});
+    await dbContext.SaveChangesAsync();
+    return Results.NoContent();
+})
+.WithOpenApi();
 
 // User Endpoints
-app.MapPost("/users", (User newUser) =>
+app.MapPost("/users", async (AppDbContext dbContext, User user) =>
 {
-    if (string.IsNullOrWhiteSpace(newUser.Name) || string.IsNullOrWhiteSpace(newUser.Email))
-    {
-        return Results.BadRequest("Name and Email are required.");
-    }
+    dbContext.Users.Add(user);
+    await dbContext.SaveChangesAsync();
+    return Results.Created($"/users/{user.Id}", user);
+})
+.WithOpenApi();
 
-    newUser.Id = Guid.NewGuid();
-    users.Add(newUser);
-    return Results.Created($"/users/{newUser.Id}", newUser);
-});
-
-app.MapGet("/users", () =>
+app.MapGet("/users", async (AppDbContext dbContext) =>
 {
-    return Results.Ok(users.Where(u => u.IsActive)); // Only return active users
-});
+    var users = await dbContext.Users.Where(u => u.IsActive).ToListAsync();
+    return Results.Ok(users);
+})
+.WithOpenApi();
 
-app.MapGet("/users/{id}", (Guid id) =>
+app.MapGet("/users/{id}", async (AppDbContext dbContext, int id) =>
 {
-    var user = users.FirstOrDefault(u => u.Id == id);
-    return user is not null ? Results.Ok(user) : Results.NotFound();
-});
+    var user = await dbContext.Users.FindAsync(id);
+    if (user == null) return Results.NotFound();
+    return Results.Ok(user);
+})
+.WithOpenApi();
 
-app.MapPut("/users/{id}", (Guid id, User updatedUser) =>
+app.MapPut("/users/{id}", async (AppDbContext dbContext, int id, User updatedUser) =>
 {
-    var user = users.FirstOrDefault(u => u.Id == id);
-    if (user is null) return Results.NotFound();
+    var user = await dbContext.Users.FindAsync(id);
+    if (user == null) return Results.NotFound();
 
     user.Name = updatedUser.Name;
     user.Email = updatedUser.Email;
     user.IsActive = updatedUser.IsActive;
-    return Results.Ok(user);
-});
 
-app.MapDelete("/users/{id}", (Guid id) =>
-{
-    var user = users.FirstOrDefault(u => u.Id == id);
-    if (user is null) return Results.NotFound();
-
-    user.IsActive = false; // Soft delete by marking as inactive
+    await dbContext.SaveChangesAsync();
     return Results.NoContent();
-});
+})
+.WithOpenApi();
+
+app.MapDelete("/users/{id}", async (AppDbContext dbContext, int id) =>
+{
+    var user = await dbContext.Users.FindAsync(id);
+    if (user == null) return Results.NotFound();
+
+    user.IsActive = false;
+    await dbContext.SaveChangesAsync();
+    return Results.NoContent();
+})
+.WithOpenApi();
+
+app.MapGet("/tasks/assignees", async (AppDbContext dbContext, int taskGroupId) =>
+{
+    var taskGroup = await dbContext.TaskGroups
+        .Include(tg => tg.Organization)
+        .Include(tg => tg.CoWorkers)
+        .FirstOrDefaultAsync(tg => tg.Id == taskGroupId);
+
+    if (taskGroup == null) return Results.NotFound();
+
+    var possibleAssignees = await dbContext.Users
+        .Where(u => u.IsActive && (taskGroup.CoWorkers.Contains(u) || taskGroup.Organization.Members.Contains(u)))
+        .ToListAsync();
+
+    return Results.Ok(possibleAssignees);
+})
+.WithOpenApi();
 
 app.Run();
 
-// Models
+public class AppDbContext : DbContext
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+
+    public DbSet<TaskGroup> TaskGroups { get; set; }
+    public DbSet<Task> Tasks { get; set; }
+    public DbSet<User> Users { get; set; }
+    public DbSet<Organization> Organizations { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<TaskGroup>().HasQueryFilter(g => !g.IsDeleted);
+        modelBuilder.Entity<Task>().HasQueryFilter(t => !t.IsDeleted);
+
+        modelBuilder.Entity<TaskGroup>()
+            .HasMany(tg => tg.CoWorkers)
+            .WithMany(u => u.TaskGroups);
+
+        modelBuilder.Entity<Organization>()
+            .HasMany(o => o.Members)
+            .WithMany(u => u.Organizations);
+    }
+}
 public class TaskGroup
 {
-    public Guid Id { get; set; }
+    public int Id { get; set; }
     public string Name { get; set; }
-    public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
+    public bool IsDeleted { get; set; } = false;
+    public int OrganizationId { get; set; }
+    public Organization Organization { get; set; }
+    public ICollection<User> CoWorkers { get; set; } = new List<User>();
+    public ICollection<Task> Tasks { get; set; }
 }
 
 public class Task
 {
-    public Guid Id { get; set; }
-    public Guid GroupId { get; set; }
+    public int Id { get; set; }
     public string Title { get; set; }
     public string State { get; set; }
-    public Guid? AssigneeId { get; set; } // User ID
-    public DateTime CreatedAt { get; set; }
-    public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
-    public Dictionary<string, string> CustomProperties { get; set; } = new();
-}
-
-public class UserPreferences
-{
-    public List<string> ColumnOrder { get; set; } = new();
+    public int? AssigneeId { get; set; }
+    public int TaskGroupId { get; set; }
+    public bool IsDeleted { get; set; } = false;
+    public string? CustomProperties { get; set; }
+    public TaskGroup TaskGroup { get; set; }
 }
 
 public class User
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public string Name { get; set; } = string.Empty;
-    public string Email { get; set; } = string.Empty;
-    public bool IsActive { get; set; } = true; // To deactivate users if needed
+    public int Id { get; set; }
+    public string Name { get; set; }
+    public string Email { get; set; }
+    public bool IsActive { get; set; } = true;
+    public ICollection<TaskGroup> TaskGroups { get; set; } = new List<TaskGroup>();
+    public ICollection<Organization> Organizations { get; set; } = new List<Organization>();
+}
+
+public class Organization
+{
+    public ICollection<User> Members { get; set; }
 }
