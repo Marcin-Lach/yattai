@@ -1,3 +1,148 @@
 @yattTasksApi_HostAddress = http://localhost:5000
 
+### Define variables for the API base URL and resources
+@baseUrl = {{yattTasksApi_HostAddress}}
+@taskGroupsResource = task-groups
+@tasksResource = tasks
+@usersResource = users
+@assigneesResource = tasks/assignees
+
+### Task Groups API Tests
+
+# Create a new task group
+POST {{baseUrl}}/{{taskGroupsResource}}
+Content-Type: application/json
+
+{
+  "name": "Project Alpha",
+  "description": "Tasks related to Project Alpha"
+}
+
+###
+
+# Get all task groups
+GET {{baseUrl}}/{{taskGroupsResource}}
+
+###
+
+# Get a specific task group by ID
+GET {{baseUrl}}/{{taskGroupsResource}}/{taskGroupId}
+# Replace {taskGroupId} with an actual task group ID
+
+###
+
+# Update a task group
+PUT {{baseUrl}}/{{taskGroupsResource}}/{taskGroupId}
+Content-Type: application/json
+
+{
+  "name": "Updated Project Alpha",
+  "description": "Updated tasks related to Project Alpha"
+}
+
+###
+
+# Delete a task group
+DELETE {{baseUrl}}/{{taskGroupsResource}}/{taskGroupId}
+
+---
+
+### Tasks API Tests
+
+# Create a new task in a task group
+POST {{baseUrl}}/{{taskGroupsResource}}/{taskGroupId}/{{tasksResource}}
+Content-Type: application/json
+
+{
+  "title": "Set up CI/CD pipeline",
+  "state": "Pending",
+  "assigneeId": null,
+  "customProperties": {
+    "DueDate": "2025-01-10"
+  }
+}
+
+###
+
+# Get tasks for a task group with pagination and sorting
+GET {{baseUrl}}/{{taskGroupsResource}}/{taskGroupId}/{{tasksResource}}?page=1&pageSize=10&sortBy=title&sortOrder=asc
+
+###
+
+# Get a specific task by ID
+GET {{baseUrl}}/{{tasksResource}}/{taskId}
+# Replace {taskId} with an actual task ID
+
+###
+
+# Update a task
+PUT {{baseUrl}}/{{tasksResource}}/{taskId}
+Content-Type: application/json
+
+{
+  "title": "Update CI/CD pipeline",
+  "state": "In Progress",
+  "customProperties": {
+    "Priority": "High"
+  }
+}
+
+###
+
+# Delete a task
+DELETE {{baseUrl}}/{{tasksResource}}/{taskId}
+
+###
+
+# Assign a task to a user
+PUT {{baseUrl}}/{{tasksResource}}/{taskId}/assign/{userId}
+# Replace {taskId} and {userId} with actual IDs
+
+---
+
+### Users API Tests
+
+# Add a new user
+POST {{baseUrl}}/{{usersResource}}
+Content-Type: application/json
+
+{
+  "name": "Jane Doe",
+  "email": "jane.doe@example.com"
+}
+
+###
+
+# Get all active users
+GET {{baseUrl}}/{{usersResource}}
+
+###
+
+# Get a specific user by ID
+GET {{baseUrl}}/{{usersResource}}/{userId}
+# Replace {userId} with an actual user ID
+
+###
+
+# Update a user
+PUT {{baseUrl}}/{{usersResource}}/{userId}
+Content-Type: application/json
+
+{
+  "name": "Jane Smith",
+  "email": "jane.smith@example.com",
+  "isActive": true
+}
+
+###
+
+# Deactivate a user
+DELETE {{baseUrl}}/{{usersResource}}/{userId}
+
+---
+
+### Assignees API Test
+
+# Get all active users available to assign
+GET {{baseUrl}}/{{assigneesResource}}
 
